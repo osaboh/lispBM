@@ -41,7 +41,7 @@ uint32_t lettolam(uint32_t e){
   case PTR_TYPE_REF_FLOAT:
     return e;
     break;
-  case VAL_TYPE_CONS:
+  case PTR_TYPE_CONS:
     /* TODO: Work happens here */ 
     break;
 
