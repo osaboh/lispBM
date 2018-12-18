@@ -45,7 +45,7 @@ uint32_t mklam(uint32_t binds, uint32_t body) {
       
 	    
   }
-  printf("mklam falling through\n");
+  printf("falling through mklam\n"); 
   return ENC_SYM(symrepr_eerror()); 
 
 }
@@ -62,6 +62,7 @@ uint32_t lettolamlis(uint32_t e){
 		lettolamlis(cdr(e)));
   }
 
+  printf("falling through lettolamlis\n"); 
   return ENC_SYM(symrepr_eerror());
 
 }
@@ -101,7 +102,7 @@ uint32_t lettolam(uint32_t e){
       if (DEC_SYM(head) == symrepr_lambda()) {
 	return cons(head,
 		    cons(car(cdr(e)),
-			 cons(lettolam (cdr(cdr(e))), ENC_SYM(symrepr_nil()))));
+			 cons(lettolam (car(cdr(cdr(e)))), ENC_SYM(symrepr_nil()))));
       }
 
       // Special form: IF
@@ -135,6 +136,6 @@ uint32_t lettolam(uint32_t e){
   }
 
   // Falling through is an error
-  
+  printf("falling through lettolam\n"); 
   return ENC_SYM(symrepr_eerror());
 }
