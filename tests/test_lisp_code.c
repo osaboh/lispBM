@@ -18,67 +18,52 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#include "mpc.h"
-#include "parse.h"
-
-#include "heap.h" 
-#include "read.h"
+#include "heap.h"
 #include "symrepr.h"
 #include "builtin.h"
 #include "eval.h"
 #include "print.h"
+#include "tokpar.h"
 
 int main(int argc, char **argv) {
-  char *str = malloc(1024);;
-  size_t len;
 
-  mpc_ast_t* ast = NULL; 
-  int res = 0; 
-
-  heap_state_t heap_state;
-
-  uint32_t SYMBOL_NIL;
+  int res = 0;
 
   if (argc < 2) {
-    printf("Incorrect arguments\n"); 
+    printf("Incorrect arguments\n");
     return 0;
   }
-  
+
   FILE* fp = fopen(argv[1], "r");
 
   if (fp == NULL) {
-    printf("Error opening file\n"); 
-    return 0; 
+    printf("Error opening file\n");
+    return 0;
   }
 
-  fseek(fp, 0, SEEK_END); 
-  size_t size = ftell(fp); 
+  fseek(fp, 0, SEEK_END);
+  long size = ftell(fp);
+  if (size <= 0) {
+    printf("Error file empty %s\n", argv[1]);
+  }
   fseek(fp, 0, SEEK_SET);
-  char *code_buffer = malloc(size * sizeof(char) + 1);
-  size_t r = fread (code_buffer, 1, size, fp);
+  char *code_buffer = malloc((unsigned long)size * sizeof(char) + 1);
+  size_t r = fread (code_buffer, 1, (unsigned int)size, fp);
 
   if (r == 0) {
     printf("Error empty file?\n");
     return 0;
   }
-  
-  res = parser_init();
-  if (res) 
-    printf("Parser initialized.\n");
-  else { 
-    printf("Error initializing parser!\n");
-    return 0;
-  }
 
   res = symrepr_init();
-  if (res) 
+  if (res)
     printf("Symrepr initialized.\n");
   else {
     printf("Error initializing symrepr!\n");
     return 0;
   }
-  
-  int heap_size = 8 * 1024 * 1024;
+
+  unsigned int heap_size = 8 * 1024 * 1024;
   res = heap_init(heap_size);
   if (res)
     printf("Heap initialized. Heap size: %f MiB. Free cons cells: %d\n", heap_size_bytes() / 1024.0 / 1024.0, heap_num_free());
@@ -101,43 +86,30 @@ int main(int argc, char **argv) {
   else {
     printf("Error initializing evaluator.\n");
   }
-  
-  ast = parser_parse_string(code_buffer); 
-  if (!ast) {
-    printf("ERROR! parsing lisp:\n");
-    return 0;
-  }
-  
-  uint32_t t; 
-  t = read_ast(ast);
-  mpc_ast_delete(ast);
 
-  printf("I: "); simple_print(t); printf("\n"); 
-  
+  VALUE t;
+  t = tokpar_parse(code_buffer);
+
+  printf("I: "); simple_print(t); printf("\n");
+
   t = eval_program(t);
-  
+
   printf("O: "); simple_print(t); printf("\n");
 
-  if ( DEC_SYM(t) == symrepr_eerror()) {
+  if ( dec_sym(t) == symrepr_eerror()) {
     res = 0;
   }
-  
-  uint32_t rest = t;
-  while (length(rest) > 2) {
-    rest = cdr(rest);
-  }
-  
-  
-  if (res && structural_equality(car(rest),car(cdr(rest)))) {
-    printf("Test: OK!\n"); 
+
+  if (res && type_of(t) == VAL_TYPE_SYMBOL && dec_sym(t) == symrepr_true()) { // structural_equality(car(rest),car(cdr(rest)))) {
+    printf("Test: OK!\n");
     res = 1;
   } else {
-    printf("Test: Failed!\n"); 
-    res = 0; 
-  }  
-  parser_del();
+    printf("Test: Failed!\n");
+    res = 0;
+  }
+
   symrepr_del();
   heap_del();
-  
-  return res;  
+
+  return res;
 }

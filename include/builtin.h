@@ -18,13 +18,15 @@
 #ifndef BUILT_IN_H_
 #define BUILT_IN_H_
 
-typedef uint32_t (*bi_fptr)(uint32_t);
+#include "typedefs.h"
 
-bi_fptr builtin_lookup_function(uint32_t sym);
+typedef VALUE (*bi_fptr)(VALUE);
+
+bi_fptr builtin_lookup_function(VALUE sym);
 int builtin_add_function(char *sym_str, bi_fptr fun_ptr);
 int builtin_init(void);
-void builtin_del(void); 
-uint32_t built_in_gen_env(void);
+void builtin_del(void);
+VALUE built_in_gen_env(void);
 
-int structural_equality(uint32_t a, uint32_t b);
-#endif 
+int structural_equality(VALUE a, VALUE b);
+#endif

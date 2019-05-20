@@ -16,232 +16,278 @@
 */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include "heap.h"
 #include "symrepr.h"
 #ifdef VISUALIZE_HEAP
 #include "heap_vis.h"
-#endif 
+#endif
 
-
-uint32_t global_env;
-
-static cons_t*      heap = NULL; 
-static uint32_t     heap_base; 
 static heap_state_t heap_state;
 
-static uint32_t     SYMBOL_NIL; 
+static VALUE        NIL;
+static VALUE        RECOVERED;
 
 // ref_cell: returns a reference to the cell addressed by bits 3 - 26
-//           Assumes user has checked that IS_PTR was set 
-cons_t* ref_cell(uint32_t addr) {
-  return (cons_t*)(heap_base + (addr & PTR_VAL_MASK));
+//           Assumes user has checked that is_ptr was set
+cons_t* ref_cell(VALUE addr) {
+  return &heap_state.heap[dec_ptr(addr)];
+  //  return (cons_t*)(heap_base + (addr & PTR_VAL_MASK));
 }
 
-static uint32_t read_car(cons_t *cell) {
+static VALUE read_car(cons_t *cell) {
   return cell->car;
 }
 
-static uint32_t read_cdr(cons_t *cell) {
+static VALUE read_cdr(cons_t *cell) {
   return cell->cdr;
 }
 
-static void set_car_(cons_t *cell, uint32_t v) {
+static void set_car_(cons_t *cell, VALUE v) {
   cell->car = v;
 }
 
-static void set_cdr_(cons_t *cell, uint32_t v) {
+static void set_cdr_(cons_t *cell, VALUE v) {
   cell->cdr = v;
 }
 
 static void set_gc_mark(cons_t *cell) {
-  uint32_t cdr = read_cdr(cell);
-  set_cdr_(cell, cdr | GC_MARKED); 
+  VALUE cdr = read_cdr(cell);
+  set_cdr_(cell, val_set_gc_mark(cdr));
 }
 
 static void clr_gc_mark(cons_t *cell) {
-  uint32_t cdr = read_cdr(cell);
-  set_cdr_(cell, cdr & ~GC_MASK);
+  VALUE cdr = read_cdr(cell);
+  set_cdr_(cell, val_clr_gc_mark(cdr));
 }
 
-static uint32_t get_gc_mark(cons_t* cell) {
-  uint32_t cdr = read_cdr(cell);
-  return cdr & GC_MASK;
+static bool get_gc_mark(cons_t* cell) {
+  VALUE cdr = read_cdr(cell);
+  return val_get_gc_mark(cdr);
 }
 
 int generate_freelist(size_t num_cells) {
-  size_t i = 0; 
-  
-  if (!heap) return 0;
-  
-  heap_state.freelist = ENC_CONS_PTR(0); 
+  size_t i = 0;
+
+  if (!heap_state.heap) return 0;
+
+  heap_state.freelist = enc_cons_ptr(0);
+
+  cons_t *t;
 
   // Add all cells to free list
   for (i = 1; i < num_cells; i ++) {
-    cons_t *t = ref_cell( ENC_CONS_PTR(i-1)); 
-    set_car_(t, ENC_SYM(SYMBOL_NIL));    // all cars in free list are nil 
-    set_cdr_(t, ENC_CONS_PTR(i)); 
+    t = ref_cell(enc_cons_ptr(i-1));
+    set_car_(t, RECOVERED);    // all cars in free list are "RECOVERED"
+    set_cdr_(t, enc_cons_ptr(i));
   }
-  
-  heap_state.freelist_last = ENC_CONS_PTR(num_cells-1);
-  set_cdr_(ref_cell(heap_state.freelist_last), ENC_SYM(SYMBOL_NIL));
 
-  if (read_cdr(ref_cell(heap_state.freelist_last)) == ENC_SYM(SYMBOL_NIL)) {
-    return 1;
-  }
-  return 0; 
+  // Replace the incorrect pointer at the last cell.
+  t = ref_cell(enc_cons_ptr(num_cells-1));
+  set_cdr_(t, NIL);
+
+  return 1;
 }
 
-int heap_init(size_t num_cells) {
+static void heap_init_state(cons_t *addr, unsigned int num_cells, bool malloced) {
+  heap_state.heap         = addr;
+  heap_state.heap_bytes   = (unsigned int)(num_cells * sizeof(cons_t));
+  heap_state.heap_size    = num_cells;
+  heap_state.malloced = malloced;
 
-  // retrieve nil symbol value f
-  SYMBOL_NIL = symrepr_nil(); 
+  heap_state.num_alloc           = 0;
+  heap_state.num_alloc_arrays    = 0;
+  heap_state.gc_num              = 0;
+  heap_state.gc_marked           = 0;
+  heap_state.gc_recovered        = 0;
+  heap_state.gc_recovered_arrays = 0;
+}
 
-  // Allocate heap 
-  heap = (cons_t *)malloc(num_cells * sizeof(cons_t));
+int heap_init_addr(cons_t *addr, unsigned int num_cells) {
+
+  NIL = enc_sym(symrepr_nil());
+  RECOVERED = enc_sym(SPECIAL_SYM_RECOVERED);
+
+  heap_init_state(addr, num_cells, false);
+  
+  return generate_freelist(num_cells);  
+}
+
+int heap_init(unsigned int num_cells) {
+
+  NIL = enc_sym(symrepr_nil());
+  RECOVERED = enc_sym(SPECIAL_SYM_RECOVERED);
+
+  cons_t *heap = (cons_t *)malloc(num_cells * sizeof(cons_t));
 
   if (!heap) return 0;
+  heap_init_state(heap, num_cells, true);
 
-  heap_base = (uint32_t)heap;
-  
-  // Initialize heap statistics
-  heap_state.heap_base    = heap_base;
-  heap_state.heap_bytes   = (uint32_t)(num_cells * sizeof(cons_t));
-  heap_state.heap_size    = num_cells;
-  
-  heap_state.num_alloc    = 0;
-  heap_state.gc_num       = 0;
-  heap_state.gc_marked    = 0;
-  heap_state.gc_recovered = 0; 
-  
-  return (generate_freelist(num_cells)); 
+  return generate_freelist(num_cells); 
 }
-
+  
 void heap_del(void) {
-  if (heap)
-    free(heap); 
+  if (heap_state.heap && heap_state.malloced)
+    free(heap_state.heap);
 }
 
-uint32_t heap_num_free(void) {
+unsigned int heap_num_free(void) {
 
-  uint32_t count = 0;
-  uint32_t curr = heap_state.freelist; 
-  
-  while (TYPE_OF(curr) == PTR_TYPE_CONS) {
+  unsigned int count = 0;
+  VALUE curr = heap_state.freelist;
+
+  while (type_of(curr) == PTR_TYPE_CONS) {
     curr = read_cdr(ref_cell(curr));
-    count++; 
+    count++;
   }
   // Prudence.
-  if (!(TYPE_OF(curr) == VAL_TYPE_SYMBOL) &&
-      (DEC_SYM(curr) == SYMBOL_NIL)){ 
-    return 0; 
-  } 
-  return count; 
+  if (!(type_of(curr) == VAL_TYPE_SYMBOL) &&
+      curr == NIL){
+    return 0;
+  }
+  return count;
 }
 
 
-uint32_t heap_allocate_cell(uint32_t ptr_type) {
+VALUE heap_allocate_cell(TYPE ptr_type) {
 
-  uint32_t res;
-  
-  if (! IS_PTR(heap_state.freelist)) {
+  VALUE res;
+
+  if (!is_ptr(heap_state.freelist)) {
     // Free list not a ptr (should be Symbol NIL)
-    if ((VAL_TYPE(heap_state.freelist) == VAL_TYPE_SYMBOL) &&
-	(DEC_SYM(heap_state.freelist) == SYMBOL_NIL)) {
+    if ((type_of(heap_state.freelist) == VAL_TYPE_SYMBOL) &&
+	(heap_state.freelist == NIL)) {
       // all is as it should be (but no free cells)
-      return heap_state.freelist; 
+      return enc_sym(symrepr_merror());
     } else {
+      printf("BROKEN HEAP %"PRIx32"\n", type_of(heap_state.freelist));
       // something is most likely very wrong
-      //printf("heap_allocate_cell Error\n"); 
-      return ENC_SYM(SYMBOL_NIL);
-    }   
-  } else { // it is a ptr replace freelist with cdr of freelist; 
-    res = heap_state.freelist;
-    res = res | ptr_type;
-    heap_state.freelist =
-      read_cdr(ref_cell(heap_state.freelist));
+      //printf("heap_allocate_cell Error\n");
+      return enc_sym(symrepr_merror());
+    }
   }
+
+  // it is a ptr replace freelist with cdr of freelist;
+  res = heap_state.freelist;
+
+  if (type_of(res) != PTR_TYPE_CONS) {
+    printf("ERROR: freelist is corrupt\n");
+  }
+
+  heap_state.freelist = cdr(heap_state.freelist);
 
   heap_state.num_alloc++;
 
   // set some ok initial values (nil . nil)
-  set_car_(ref_cell(res), ENC_SYM(SYMBOL_NIL));
-  set_cdr_(ref_cell(res), ENC_SYM(SYMBOL_NIL)); 	  
-  
+  set_car_(ref_cell(res), NIL);
+  set_cdr_(ref_cell(res), NIL);
+
   // clear GC bit on allocated cell
   clr_gc_mark(ref_cell(res));
+
+  res = res | ptr_type;
   return res;
 }
 
-uint32_t heap_num_allocated(void) {
+unsigned int heap_num_allocated(void) {
   return heap_state.num_alloc;
 }
-uint32_t heap_size() {
-  return heap_state.heap_size; 
+unsigned int heap_size(void) {
+  return heap_state.heap_size;
 }
 
-uint32_t heap_size_bytes(void) {
+unsigned int heap_size_bytes(void) {
   return heap_state.heap_bytes;
 }
-  
+
 void heap_get_state(heap_state_t *res) {
-  res->heap_base     = heap_state.heap_base;
-  res->freelist      = heap_state.freelist;
-  res->freelist_last = heap_state.freelist_last;
-  res->heap_size     = heap_state.heap_size;
-  res->heap_bytes    = heap_state.heap_bytes;
-  res->num_alloc     = heap_state.num_alloc;
-  res->gc_num        = heap_state.gc_num;
-  res->gc_marked     = heap_state.gc_marked;
-  res->gc_recovered  = heap_state.gc_recovered;
+  res->heap                = heap_state.heap;
+  res->malloced            = heap_state.malloced;
+  res->freelist            = heap_state.freelist;
+  res->heap_size           = heap_state.heap_size;
+  res->heap_bytes          = heap_state.heap_bytes;
+  res->num_alloc           = heap_state.num_alloc;
+  res->num_alloc_arrays    = heap_state.num_alloc_arrays;
+  res->gc_num              = heap_state.gc_num;
+  res->gc_marked           = heap_state.gc_marked;
+  res->gc_recovered        = heap_state.gc_recovered;
+  res->gc_recovered_arrays = heap_state.gc_recovered_arrays;
 }
 
 // Recursive implementation can exhaust stack!
-int gc_mark_phase(uint32_t env) {
+int gc_mark_phase(VALUE env) {
 
-  if (!IS_PTR(env)) {
-      return 1; // Nothing to mark here 
+  if (!is_ptr(env)) {
+      return 1; // Nothing to mark here
   }
 
   if (get_gc_mark(ref_cell(env))) {
-    return 1; // Circular object on heap, or visited (aux)..
+    return 1; // Circular object on heap, or visited..
   }
-    
+
   // There is at least a pointer to one cell here. Mark it and recurse over  car and cdr 
   heap_state.gc_marked ++;
 
-  set_gc_mark(ref_cell(env)); 
+  set_gc_mark(ref_cell(env));
+
+
+
+  VALUE car_env = car(env);
+  VALUE cdr_env = cdr(env);
+  VALUE t_car   = type_of(car_env);
+  VALUE t_cdr   = type_of(cdr_env);
+
+  bool car_done = false;
+  bool cdr_done = false;
+  
+  if (t_car == PTR_TYPE_BOXED_I ||
+      t_car == PTR_TYPE_BOXED_U ||
+      t_car == PTR_TYPE_BOXED_F ||
+      t_car == PTR_TYPE_ARRAY) {
+    set_gc_mark(ref_cell(car_env));
+    car_done = true;;
+  }
+
+  if (t_cdr == PTR_TYPE_BOXED_I ||
+      t_cdr == PTR_TYPE_BOXED_U ||
+      t_cdr == PTR_TYPE_BOXED_F ||
+      t_cdr == PTR_TYPE_ARRAY) {
+    set_gc_mark(ref_cell(cdr_env));
+    cdr_done = true;
+  }
 
   int res = 1;
-  if (IS_PTR(car(env))) 
+  if (!car_done && is_ptr(car(env)) && ptr_type(car(env)) == PTR_TYPE_CONS)
     res &= gc_mark_phase(car(env));
-  if (IS_PTR(cdr(env)))
-    res &= gc_mark_phase(cdr(env)); 
-  
-  return res; 
+  if (!cdr_done && is_ptr(cdr(env)) && ptr_type(cdr(env)) == PTR_TYPE_CONS)
+    res &= gc_mark_phase(cdr(env));
+
+  return res;
 }
 
 // The free list should be a "proper list"
-// Using a while loop to traverse over the cdrs 
+// Using a while loop to traverse over the cdrs
 int gc_mark_freelist() {
 
-  uint32_t curr;
+  VALUE curr;
   cons_t *t;
-  uint32_t fl = heap_state.freelist;
+  VALUE fl = heap_state.freelist;
 
-  if (!IS_PTR(fl)) { 
-    if ((VAL_TYPE(fl) == VAL_TYPE_SYMBOL) &&
-	(DEC_SYM(fl) == SYMBOL_NIL)){
-      return 1; // Nothing to mark here 
+  if (!is_ptr(fl)) {
+    if (val_type(fl) == VAL_TYPE_SYMBOL &&
+	fl == NIL){
+      return 1; // Nothing to mark here
     } else {
-      printf(" ERROR CASE! %x \n", fl);
+      printf(" ERROR CASE! %"PRIx32" \n", fl);
       return 0;
     }
   }
 
   curr = fl;
-  while (IS_PTR(curr)){
+  while (is_ptr(curr)){
      t = ref_cell(curr);
      set_gc_mark(t);
      curr = read_cdr(t);
@@ -249,184 +295,302 @@ int gc_mark_freelist() {
      heap_state.gc_marked ++;
   }
 
-  if ( t != ref_cell(heap_state.freelist_last)) {
-    printf( "CORRUPT FREELIST!\n");
-  }
   return 1;
 }
 
-int gc_mark_aux(uint32_t *aux_data, uint32_t aux_size) {
+int gc_mark_aux(UINT *aux_data, unsigned int aux_size) {
 
-  cons_t *t;
- 
-  for (int i = 0; i < aux_size; i ++) {
-    if (IS_PTR(aux_data[i])) {
+  for (unsigned int i = 0; i < aux_size; i ++) {
+    if (is_ptr(aux_data[i])) {
 
-      uint32_t pt_t = PTR_TYPE(aux_data[i]);
-      uint32_t pt_v = DEC_PTR(aux_data[i]);
+      TYPE pt_t = ptr_type(aux_data[i]);
+      UINT pt_v = dec_ptr(aux_data[i]);
 
-      if ( pt_t == PTR_TYPE_CONS ||
-	   pt_t == PTR_TYPE_I32 ||
-	   pt_t == PTR_TYPE_U32 ||
-	   pt_t == PTR_TYPE_F32 ||
-	   pt_t == PTR_TYPE_VEC_I32 ||
-	   pt_t == PTR_TYPE_VEC_U32 ||
-	   pt_t == PTR_TYPE_VEC_F32 ||
-	   pt_t == PTR_TYPE_STRING  &&
+      if ( (pt_t == PTR_TYPE_CONS ||
+	    pt_t == PTR_TYPE_BOXED_I ||
+	    pt_t == PTR_TYPE_BOXED_U ||
+	    pt_t == PTR_TYPE_BOXED_F ||
+	    pt_t == PTR_TYPE_ARRAY ||
+	    pt_t == PTR_TYPE_REF ||
+	    pt_t == PTR_TYPE_STREAM) &&
 	   pt_v < heap_state.heap_size) {
- 
+
 	gc_mark_phase(aux_data[i]);
       }
     }
   }
-  
-  return 1; 
+
+  return 1;
 }
 
 
 // Sweep moves non-marked heap objects to the free list.
 int gc_sweep_phase(void) {
 
-  uint32_t i = 0; 
-  cons_t *heap = (cons_t *)heap_base;
-  cons_t *fl_last; 
-  
-  uint32_t cdr;
-  
-  for (i = 0; i < heap_state.heap_size; i ++) {   
+  unsigned int i = 0;
+  cons_t *heap = (cons_t *)heap_state.heap;
+
+  for (i = 0; i < heap_state.heap_size; i ++) {
     if ( !get_gc_mark(&heap[i])){
-      fl_last = ref_cell(heap_state.freelist_last);
 
-      if ( DEC_SYM(read_cdr(fl_last)) != SYMBOL_NIL) {
-	printf( "ERROR: cdr of fl_last not nil\n");
+      // Check if this cell is a pointer to an array
+      // and free it.
+
+      // TODO: Maybe also has to check for boxed values
+      //
+      if (type_of(heap[i].cdr) == VAL_TYPE_SYMBOL &&
+	  dec_sym(heap[i].cdr) == SPECIAL_SYM_ARRAY) {
+	array_t *arr = (array_t*)heap[i].car;
+	switch(arr->elt_type) {
+	case VAL_TYPE_CHAR:
+	  if (arr->data.c) free(arr->data.c);
+	  break;
+	case VAL_TYPE_I:
+	case PTR_TYPE_BOXED_I:
+	  if (arr->data.i) free(arr->data.i);
+	  break;
+	case VAL_TYPE_U:
+	case PTR_TYPE_BOXED_U:
+	case VAL_TYPE_SYMBOL:
+	  if (arr->data.u) free(arr->data.u);
+	  break;
+	case PTR_TYPE_BOXED_F:
+	  if (arr->data.f) free(arr->data.f);
+	  break;
+	default:
+	  return 0; // Error case: unrecognized element type.
+	}
+	free(arr);
+	heap_state.gc_recovered_arrays++;
       }
-      
-      // Clear the "freed" cell. 
-      set_cdr_(&heap[i], 0); 
-      set_cdr_(&heap[i], ENC_SYM(SYMBOL_NIL));
-      set_car_(&heap[i], ENC_SYM(SYMBOL_NIL));
 
-      // create pointer to free cell to put at end of freelist
-      uint32_t addr = ENC_CONS_PTR(i); 
+      // create pointer to use as new freelist
+      UINT addr = enc_cons_ptr(i);
 
-      set_cdr_(fl_last, addr);
-      set_gc_mark(fl_last); // the above set_cdr_ clears the gc mark on fl_last.
-      heap_state.freelist_last = addr;
+      // Clear the "freed" cell.
+      heap[i].car = RECOVERED;
+      heap[i].cdr = heap_state.freelist;
+      heap_state.freelist = addr;
 
       heap_state.num_alloc --;
       heap_state.gc_recovered ++;
     }
     clr_gc_mark(&heap[i]);
   }
-  return 1; 
+  return 1;
 }
 
-int heap_perform_gc(uint32_t env) {
+int heap_perform_gc(VALUE env) {
   heap_state.gc_num ++;
-  heap_state.gc_recovered = 0; 
-  heap_state.gc_marked = 0; 
+  heap_state.gc_recovered = 0;
+  heap_state.gc_marked = 0;
 
   gc_mark_freelist();
   gc_mark_phase(env);
   return gc_sweep_phase();
 }
 
-int heap_perform_gc_aux(uint32_t env, uint32_t env2, uint32_t exp, uint32_t exp2, uint32_t *aux_data, uint32_t aux_size) {
+int heap_perform_gc_extra(VALUE env, VALUE env2, VALUE exp, VALUE exp2, VALUE list) {
   heap_state.gc_num ++;
-  heap_state.gc_recovered = 0; 
-  heap_state.gc_marked = 0; 
+  heap_state.gc_recovered = 0;
+  heap_state.gc_marked = 0;
 
   gc_mark_freelist();
   gc_mark_phase(exp);
   gc_mark_phase(exp2);
   gc_mark_phase(env);
   gc_mark_phase(env2);
-  gc_mark_aux(aux_data, aux_size);   
+  gc_mark_phase(list);
 
 #ifdef VISUALIZE_HEAP
   heap_vis_gen_image();
-#endif 
-  
+#endif
+
+  return gc_sweep_phase();
+}
+
+int heap_perform_gc_aux(VALUE env, VALUE env2, VALUE exp, VALUE exp2, UINT *aux_data, unsigned int aux_size) {
+  heap_state.gc_num ++;
+  heap_state.gc_recovered = 0;
+  heap_state.gc_marked = 0;
+
+  gc_mark_freelist();
+  gc_mark_phase(exp);
+  gc_mark_phase(exp2);
+  gc_mark_phase(env);
+  gc_mark_phase(env2);
+  gc_mark_aux(aux_data, aux_size);
+
+#ifdef VISUALIZE_HEAP
+  heap_vis_gen_image();
+#endif
+
   return gc_sweep_phase();
 }
 
 
 // construct, alter and break apart
-uint32_t cons(uint32_t car, uint32_t cdr) {
-  uint32_t addr = heap_allocate_cell(PTR_TYPE_CONS);
-  if ( IS_PTR(addr)) {
+VALUE cons(VALUE car, VALUE cdr) {
+  VALUE addr = heap_allocate_cell(PTR_TYPE_CONS);
+  if ( is_ptr(addr)) {
     set_car_(ref_cell(addr), car);
     set_cdr_(ref_cell(addr), cdr);
-    return addr;
   }
-  else return ENC_SYM(symrepr_nil());
+
+  // heap_allocate_cell returns NIL if out of heap.
+  return addr;
 }
 
-uint32_t car(uint32_t c){
-  
-  if (TYPE_OF(c) == VAL_TYPE_SYMBOL &&
-      DEC_SYM(c) == SYMBOL_NIL) {
+VALUE car(VALUE c){
+
+  if (type_of(c) == VAL_TYPE_SYMBOL &&
+      c == NIL) {
     return c; // if nil, return nil.
   }
-  
-  //if (TYPE_OF(c) == PTR_TYPE_CONS ||
-  //    TYPE_OF(c) == PTR_TYPE_F32) {   //TODO: one test should be enough
-  if (IS_PTR(c) ){ 
+
+  if (is_ptr(c) ){
     cons_t *cell = ref_cell(c);
     return read_car(cell);
-  } 
-  return ENC_SYM(symrepr_terror()); 
+  }
+  return enc_sym(symrepr_terror());
 }
 
-uint32_t cdr(uint32_t c){
- 
-  if (TYPE_OF(c) == VAL_TYPE_SYMBOL &&
-      DEC_SYM(c) == SYMBOL_NIL) {
+VALUE cdr(VALUE c){
+
+  if (type_of(c) == VAL_TYPE_SYMBOL &&
+      c == NIL) {
     return c; // if nil, return nil.
   }
-  
-  if (TYPE_OF(c) == PTR_TYPE_CONS) {
+
+  if (type_of(c) == PTR_TYPE_CONS) {
     cons_t *cell = ref_cell(c);
     return read_cdr(cell);
   }
-  return ENC_SYM(symrepr_terror()); 
+  return enc_sym(symrepr_terror());
 }
 
-void set_car(uint32_t c, uint32_t v) {
-  if (IS_PTR(c) && PTR_TYPE(c) == PTR_TYPE_CONS) {
+void set_car(VALUE c, VALUE v) {
+  if (is_ptr(c) && ptr_type(c) == PTR_TYPE_CONS) {
     cons_t *cell = ref_cell(c);
     set_car_(cell,v);
   }
 }
 
-void set_cdr(uint32_t c, uint32_t v) {
-  if (TYPE_OF(c) == PTR_TYPE_CONS){
+void set_cdr(VALUE c, VALUE v) {
+  if (type_of(c) == PTR_TYPE_CONS){
     cons_t *cell = ref_cell(c);
-    set_cdr_(cell,v); 
+    set_cdr_(cell,v);
   }
 }
 
-/* calculate length of a proper list */ 
-uint32_t length(uint32_t c) {
-  uint32_t len = 0;
-  
-  while (TYPE_OF(c) == PTR_TYPE_CONS){
-    len ++; 
-    c = cdr(c); 
+/* calculate length of a proper list */
+unsigned int length(VALUE c) {
+  unsigned int len = 0;
+
+  while (type_of(c) == PTR_TYPE_CONS){
+    len ++;
+    c = cdr(c);
   }
-  return len; 
+  return len;
 }
 
-/* reverse a proper list */ 
-uint32_t reverse(uint32_t list) {
+/* reverse a proper list */
+VALUE reverse(VALUE list) {
+  if (type_of(list) == VAL_TYPE_SYMBOL &&
+      list == NIL) {
+    return list;
+  }
 
-  uint32_t curr = list; 
-  
-  uint32_t new_list = ENC_SYM(symrepr_nil()); 
-  while (TYPE_OF(curr) == PTR_TYPE_CONS) {
+  VALUE curr = list;
+
+  VALUE new_list = NIL;
+  while (type_of(curr) == PTR_TYPE_CONS) {
 
     new_list = cons(car(curr), new_list);
-    curr = cdr(curr); 
+    if (type_of(new_list) == VAL_TYPE_SYMBOL) {
+      return enc_sym(symrepr_merror());
+    }
+    curr = cdr(curr);
   }
-  return new_list; 
+  return new_list;
+}
+
+VALUE copy(VALUE list) {
+  // TODO: a more efficient approach
+  VALUE res = NIL;
+
+  VALUE curr = list;
+
+  while (type_of(curr) == PTR_TYPE_CONS) {
+    VALUE c = cons (car(curr), res);
+    if (type_of(c) == VAL_TYPE_SYMBOL) {
+      return enc_sym(symrepr_merror());
+    }
+    res = c;
+    curr = cdr(curr);
+  }
+
+  return reverse(res); 
+}
+
+
+
+
+////////////////////////////////////////////////////////////
+// ARRAY, REF and Stream functionality
+////////////////////////////////////////////////////////////
+
+// Arrays are part of the heap module because their lifespan is managed
+// by the garbage collector. The data in the array is not stored
+// in the "heap of cons cells".
+int heap_allocate_array(VALUE *res, unsigned int size, TYPE type){
+
+  array_t *array = malloc(sizeof(array_t));
+  // allocating a cell that will, to start with, be a cons cell.
+  VALUE cell  = heap_allocate_cell(PTR_TYPE_CONS);
+
+  switch(type) {
+  case PTR_TYPE_BOXED_I: // array of I
+    array->data.i = (INT*)malloc(size * sizeof(INT));
+    if (array->data.i == NULL) return 0;
+    break;
+  case PTR_TYPE_BOXED_U: // array of U
+    array->data.u = (UINT*)malloc(size * sizeof(UINT));
+    if (array->data.u == NULL) return 0;
+    break;
+  case PTR_TYPE_BOXED_F: // array of Float
+    array->data.f = (float*)malloc(size * sizeof(float));
+    if (array->data.f == NULL) return 0;
+    break;
+  case VAL_TYPE_CHAR: // Array of Char
+    array->data.c = (char*)malloc(size * sizeof(char));
+    if (array->data.c == NULL) return 0;
+    break;
+  case VAL_TYPE_I:
+    array->data.i = (INT*)malloc(size * sizeof(INT));
+    break;
+  case VAL_TYPE_U:
+    array->data.u = (UINT*)malloc(size * sizeof(UINT));
+    break;
+  case VAL_TYPE_SYMBOL:
+    array->data.u = (UINT*)malloc(size * sizeof(UINT));
+    break;
+  default:
+    *res = NIL;
+    return 0;
+  }
+
+  array->elt_type = type;
+  array->size = size;
+
+  set_car(cell, (UINT)array);
+  set_cdr(cell, enc_sym(SPECIAL_SYM_ARRAY));
+
+  cell = cell | PTR_TYPE_ARRAY;
+
+  *res = cell;
+
+  heap_state.num_alloc_arrays ++;
+
+  return 1;
 }

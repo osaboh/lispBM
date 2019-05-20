@@ -4,17 +4,12 @@
 #include "platform.h"
 #include "xil_printf.h"
 
-
-#include "mpc.h"
-#include "parse.h"
-
 #include "heap.h"
-#include "read.h"
 #include "symrepr.h"
 #include "builtin.h"
 #include "eval.h"
 #include "print.h"
-
+#include "tokpar.h"
 
 int inputline(char *buffer, int size) {
   int n = 0;
@@ -58,19 +53,9 @@ int main()
 
 	char *str = malloc(1024);;
 	size_t len = 1024;
-
-	mpc_ast_t* ast = NULL;
 	int res = 0;
 
 	heap_state_t heap_state;
-
-	res = parser_init();
-	if (res)
-		printf("Parser initialized.\n");
-	else {
-		printf("Error initializing parser!\n");
-		return 0;
-	}
 
 	res = symrepr_init();
 	if (res)
@@ -82,7 +67,7 @@ int main()
 	int heap_size = 8 * 1024 * 1024;
 	res = heap_init(heap_size);
 	if (res)
-		printf("Heap initialized. Heap size: %f MiB. Free cons cells: %lu\n", heap_size_bytes() / 1024.0 / 1024.0, heap_num_free());
+		printf("Heap initialized. Heap size: %f MiB. Free cons cells: %u\n", heap_size_bytes() / 1024.0 / 1024.0, heap_num_free());
 	else {
 		printf("Error initializing heap!\n");
 		return 0;
@@ -113,40 +98,32 @@ int main()
 
 		if (strncmp(str, "info", 4) == 0) {
 			printf("############################################################\n");
-			printf("Used cons cells: %lu \n", heap_size - heap_num_free());
+			printf("Used cons cells: %u \n", heap_size - heap_num_free());
 			printf("ENV: "); simple_print(eval_get_env()); printf("\n");
 			//symrepr_print();
 			heap_perform_gc(eval_get_env());
 			heap_get_state(&heap_state);
-			printf("GC counter: %lu\n", heap_state.gc_num);
-			printf("Recovered: %lu\n", heap_state.gc_recovered);
-			printf("Marked: %lu\n", heap_state.gc_marked);
-			printf("Free cons cells: %lu\n", heap_num_free());
+			printf("GC counter: %u\n", heap_state.gc_num);
+			printf("Recovered: %u\n", heap_state.gc_recovered);
+			printf("Marked: %u\n", heap_state.gc_marked);
+			printf("Free cons cells: %u\n", heap_num_free());
 			printf("############################################################\n");
 		} else {
 
-			ast = parser_parse_string(str);
-			if (!ast) {
-				printf("ERROR!\n");
-				continue; // Go back and try again
-			}
-
-			uint32_t t;
-			t = read_ast(ast);
+			VALUE t;
+			t = tokpar_parse(str);
 
 			t = eval_program(t);
 
-			if (DEC_SYM(t) == symrepr_eerror()) {
+			if (dec_sym(t) == symrepr_eerror()) {
 				printf("%s\n", eval_get_error());
 			} else {
 				printf("> "); simple_print(t); printf("\n");
 			}
 
-			mpc_ast_delete(ast);
 		}
 	}
 
-	parser_del();
 	symrepr_del();
 	heap_del();
 

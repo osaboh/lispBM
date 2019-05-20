@@ -38,145 +38,150 @@
   }\
   } while(0)
 
-static uint32_t evlis(uint32_t ptcons, uint32_t env);
-static uint32_t apply(uint32_t closure, uint32_t args); 
-static uint32_t apply_builtin(uint32_t sym, uint32_t args); 
-static uint32_t eval_in_env(uint32_t, uint32_t); 
-static uint32_t eval_let_bindings(uint32_t, uint32_t);
+static VALUE evlis(VALUE ptcons, VALUE env);
+static VALUE apply(VALUE closure, VALUE args);
+static VALUE apply_builtin(VALUE sym, VALUE args);
+static VALUE eval_in_env(VALUE lisp, VALUE env);
+static VALUE eval_let_bindings(VALUE bind_list, VALUE env);
 
-static uint32_t copy_bindings(uint32_t syms, uint32_t env); 
-
-static char eval_error_string[EVAL_ERROR_BUFFER_SIZE]; 
+static char eval_error_string[EVAL_ERROR_BUFFER_SIZE];
 
 static jmp_buf error_jmp_buffer;
-static jmp_buf *error_jmp_ptr = NULL; 
+static jmp_buf *error_jmp_ptr = NULL;
 
+static VALUE eval_global_env;
+
+static VALUE NIL;
 
 char *eval_get_error() {
   return eval_error_string;
 }
 
-uint32_t eval_get_env(void) {
-  return global_env;
+VALUE eval_get_env(void) {
+  return eval_global_env;
 }
 
-uint32_t eval_bi(uint32_t lisp) {
+VALUE eval_bi(VALUE lisp) {
 
   if (!error_jmp_ptr) {
     error_jmp_ptr = &error_jmp_buffer;
 
     if (setjmp(*error_jmp_ptr)) {
       error_jmp_ptr = 0;
-      return ENC_SYM(symrepr_eerror()); 
+      return enc_sym(symrepr_eerror());
     }
   }
-  
-  uint32_t res = eval_in_env(car(lisp),ENC_SYM(symrepr_nil()));
-  
+
+  return eval_in_env(car(lisp),NIL);
+
 }
 
 
 int eval_init() {
 
-  int res = 1;
-  res &= builtin_add_function("eval", eval_bi);
- 
-  global_env = built_in_gen_env();
+  if (!builtin_add_function("eval", eval_bi)) return 0;
 
-  uint32_t nil_entry = cons(ENC_SYM(symrepr_nil()), ENC_SYM(symrepr_nil()));
-  global_env = cons(nil_entry, global_env);
+  eval_global_env = built_in_gen_env();
+  if (type_of(eval_global_env) == VAL_TYPE_SYMBOL) return 0;
 
-  return res; 
-  
+  NIL = enc_sym(symrepr_nil());
+
+  VALUE nil_entry = cons(NIL,NIL);
+  if (type_of(nil_entry) == VAL_TYPE_SYMBOL) return 0;
+
+  eval_global_env = cons(nil_entry, eval_global_env);
+  if (type_of(eval_global_env) == VAL_TYPE_SYMBOL) return 0;
+
+  return 1;
 }
 
-uint32_t do_eval_program(uint32_t lisp) {
-   
+VALUE do_eval_program(VALUE lisp) {
+
   // Program is a list of expressions that should be evaluated individually
-  uint32_t res; 
-  uint32_t local_env = ENC_SYM(symrepr_nil());
+  // The result of evaluating the last expression is the result of the program.
 
-  if (TYPE_OF(lisp) == PTR_TYPE_CONS) {
-    
-    uint32_t car_val = eval_in_env(car(lisp),local_env);
-    uint32_t cdr_val = eval_program(cdr(lisp)); 
-    
-    res = cons(car_val, cdr_val);  
-  } else {
-    res =  eval_in_env(lisp,local_env);
+  VALUE res = NIL;
+  VALUE local_env = NIL;
+  VALUE curr = lisp;
+
+  if (dec_sym(lisp) == symrepr_eerror() ||
+      dec_sym(lisp) == symrepr_rerror() ||
+      dec_sym(lisp) == symrepr_merror() ||
+      dec_sym(lisp) == symrepr_terror())  return lisp;
+
+  while ( type_of(curr) == PTR_TYPE_CONS) {
+    res = eval_in_env(car(curr), local_env);
+    curr = cdr(curr);
   }
-
-  return res;   
+  return res;
 }
 
-uint32_t eval_program(uint32_t lisp) {
+VALUE eval_program(VALUE lisp) {
 
   // Setup jmp buffer for breaking out of recursion on error.
   if (!error_jmp_ptr) {
-    error_jmp_ptr = &error_jmp_buffer; 
+    error_jmp_ptr = &error_jmp_buffer;
 
     if (setjmp(*error_jmp_ptr)) {
       error_jmp_ptr = 0;
-      return ENC_SYM(symrepr_eerror());
+      return enc_sym(symrepr_eerror());
     }
   }
-  
-  uint32_t res = do_eval_program(lisp);
-  
+
+  VALUE res = do_eval_program(lisp);
+
   if (error_jmp_ptr) error_jmp_ptr = 0;
-  return res; 
+  return res;
 }
 
-uint32_t eval_in_env(uint32_t lisp, uint32_t env) {
+VALUE eval_in_env(VALUE lisp, VALUE env) {
 
-  uint32_t val = 0; 
-  uint32_t tmp = 0;
+  VALUE tmp = 0;
   int ret;
-  uint32_t head;
-  
-  switch(TYPE_OF(lisp)) {
+  VALUE head;
+
+  switch(type_of(lisp)) {
   case VAL_TYPE_SYMBOL:
     ret = env_lookup(lisp, env, &tmp);
     if (!ret) {
-      ret = env_lookup(lisp, global_env, &tmp);
+      ret = env_lookup(lisp, eval_global_env, &tmp);
     }
     if (ret) return tmp;
-    ERROR("Eval: Variable lookup failed: %s ",symrepr_lookup_name(DEC_SYM(lisp)));
-    break;
-  case VAL_TYPE_I28:
-  case VAL_TYPE_U28:
+    return enc_sym(symrepr_eerror());
+    //ERROR("Eval: Variable lookup failed: %s ",symrepr_lookup_name(dec_sym(lisp)));
+  case VAL_TYPE_I:
+  case VAL_TYPE_U:
   case VAL_TYPE_CHAR:
-    return lisp;    
-    break;
+    return lisp;
   case PTR_TYPE_CONS:
     head = car(lisp);
 
-    if (TYPE_OF(head) == VAL_TYPE_SYMBOL) {
+    if (type_of(head) == VAL_TYPE_SYMBOL) {
 
       // Special form: QUOTE
-      if (DEC_SYM(head) == symrepr_quote()) {
+      if (dec_sym(head) == symrepr_quote()) {
 
 	return (car (cdr (lisp)));
       }
 
       // Special form: LAMBDA
-      if (DEC_SYM(head) == symrepr_lambda()) {
+      if (dec_sym(head) == symrepr_lambda()) {
 
-	uint32_t env_cpy;
+	VALUE env_cpy;
 	if (!env_copy_shallow(env, &env_cpy))
-	  ERROR("OUT OF MEMORY"); 
-	return cons(ENC_SYM(symrepr_closure()),
+	  ERROR("OUT OF MEMORY");
+	return cons(enc_sym(symrepr_closure()),
 		    cons(car(cdr(lisp)),
 			 cons(car(cdr(cdr(lisp))),
-			      cons(env_cpy, ENC_SYM(symrepr_nil())))));
+			      cons(env_cpy, NIL))));
       }
 
       // Special form: IF
-      if (DEC_SYM(head) == symrepr_if()) {
+      if (dec_sym(head) == symrepr_if()) {
 
-	uint32_t pred_res = eval_in_env(car(cdr(lisp)), env);
-	if (VAL_TYPE(pred_res) == VAL_TYPE_SYMBOL &&
-	    DEC_SYM(pred_res) == symrepr_true()) {
+	VALUE pred_res = eval_in_env(car(cdr(lisp)), env);
+	if (val_type(pred_res) == VAL_TYPE_SYMBOL &&
+	    dec_sym(pred_res) == symrepr_true()) {
 	  return eval_in_env(car(cdr(cdr(lisp))), env);
 	} else {
 	  // TODO: CHECK THAT IS NOT A PROGRAMMER ERROR
@@ -185,63 +190,61 @@ uint32_t eval_in_env(uint32_t lisp, uint32_t env) {
       }
 
       // Special form: DEFINE
-      if (DEC_SYM(head) == symrepr_define()) {
-	uint32_t key = car(cdr(lisp));
-	uint32_t val = eval_in_env(car(cdr(cdr(lisp))), env);
-	uint32_t curr = global_env; 
+      if (dec_sym(head) == symrepr_define()) {
+	VALUE key = car(cdr(lisp));
+	VALUE val = eval_in_env(car(cdr(cdr(lisp))), env);
+	VALUE curr = eval_global_env;
 
-	if (TYPE_OF(key) != VAL_TYPE_SYMBOL)
+	if (type_of(key) != VAL_TYPE_SYMBOL)
 	  ERROR("Define expects a symbol");
 
-	if (DEC_SYM(key) == symrepr_nil())
+	if (key == NIL)
 	  ERROR("Cannot redefine nil");
 
-	while(TYPE_OF(curr) == PTR_TYPE_CONS) {
+	while(type_of(curr) == PTR_TYPE_CONS) {
 	  if (car(car(curr)) == key) {
 	    set_cdr(car(curr),val);
-	    return ENC_SYM(symrepr_true());
+	    return enc_sym(symrepr_true());
 	  }
 	  curr = cdr(curr);
 	}
-	uint32_t keyval = cons(key,val);
-	global_env = cons(keyval,global_env);
-	return ENC_SYM(symrepr_true()); 	
+	VALUE keyval = cons(key,val);
+	eval_global_env = cons(keyval,eval_global_env);
+	return enc_sym(symrepr_true());
       }
 
       // Special form: LET
-      if (DEC_SYM(head) == symrepr_let()) {
+      if (dec_sym(head) == symrepr_let()) {
 
-	uint32_t new_env = eval_let_bindings(car(cdr(lisp)),env);
+	VALUE new_env = eval_let_bindings(car(cdr(lisp)),env);
 	return eval_in_env(car(cdr(cdr(lisp))),new_env);
       }
 
     } // If head is symbol
-    
+
     // Possibly an application form:
 
-    uint32_t head_val = eval_in_env(head, env); 
-  
-    if (TYPE_OF(head_val) == VAL_TYPE_SYMBOL) {
+    VALUE head_val = eval_in_env(head, env);
+
+    if (type_of(head_val) == VAL_TYPE_SYMBOL) {
       return apply_builtin(head_val, evlis(cdr(lisp),env));
     }
-    
+
     // Possibly a closure application (or programmer error)
     return apply(head_val, evlis(cdr(lisp), env));
-    
+
     break;
-  case PTR_TYPE_I32:
-  case PTR_TYPE_U32:
-  case PTR_TYPE_F32:
+  case PTR_TYPE_BOXED_I:
+  case PTR_TYPE_BOXED_U:
+  case PTR_TYPE_BOXED_F:
     return lisp;
     break;
-  case PTR_TYPE_VEC_I32:
-  case PTR_TYPE_VEC_U32:
-  case PTR_TYPE_VEC_F32:
-  case PTR_TYPE_STRING:
-  case PTR_TYPE_REF_I32:
-  case PTR_TYPE_REF_U32:
-  case PTR_TYPE_REF_FLOAT:
-    ERROR("Boxed types not implemented");
+  case PTR_TYPE_ARRAY:
+    return lisp;
+    break;
+  case PTR_TYPE_REF:
+  case PTR_TYPE_STREAM:
+    ERROR("Arrays, refs and streams not implemented");
     break;
   default:
     ERROR("BUG! Fell through all cases in eval.");
@@ -249,80 +252,80 @@ uint32_t eval_in_env(uint32_t lisp, uint32_t env) {
   }
 
   ERROR("BUG! This cannot happen!");
-  return ENC_SYM(symrepr_eerror());
-} 
+  return enc_sym(symrepr_eerror());
+}
 
-static uint32_t apply(uint32_t closure, uint32_t args) {
+static VALUE apply(VALUE closure, VALUE args) {
 
   // TODO: error checking etc
-  uint32_t clo_sym = car(closure);      
-  uint32_t params  = car(cdr(closure)); // parameter list
-  uint32_t exp     = car(cdr(cdr(closure)));
-  uint32_t clo_env = car(cdr(cdr(cdr(closure))));
+  //VALUE clo_sym = car(closure);
+  VALUE params  = car(cdr(closure)); // parameter list
+  VALUE exp     = car(cdr(cdr(closure)));
+  VALUE clo_env = car(cdr(cdr(cdr(closure))));
 
-  uint32_t local_env;
+  VALUE local_env;
   if (!env_build_params_args(params, args, clo_env, &local_env))
-    ERROR("Could not create local environment"); 
-  //printf("CLOSURE ENV: "); simple_print(local_env); printf("\n"); 
-  
+    ERROR("Could not create local environment");
+  //printf("CLOSURE ENV: "); simple_print(local_env); printf("\n");
+
   return eval_in_env(exp,local_env);
 }
 
-// takes a ptr to cons and returns a ptr to cons.. 
-static uint32_t evlis(uint32_t pcons, uint32_t env) {
+// takes a ptr to cons and returns a ptr to cons..
+static VALUE evlis(VALUE pcons, VALUE env) {
 
-  if (TYPE_OF(pcons) == PTR_TYPE_CONS) { 
+  if (type_of(pcons) == PTR_TYPE_CONS) {
     return cons(eval_in_env(car(pcons), env),
-		evlis(cdr(pcons),env)); 
+		evlis(cdr(pcons),env));
   }
 
-  if (TYPE_OF(pcons) == VAL_TYPE_SYMBOL &&
-      DEC_SYM(pcons) == symrepr_nil()) {
-    return ENC_SYM(symrepr_nil());
+  if (type_of(pcons) == VAL_TYPE_SYMBOL &&
+      pcons == NIL) {
+    return NIL;
   }
 
-  ERROR("Evlis argument is not a list"); 
-  return ENC_SYM(symrepr_eerror());
+  ERROR("Evlis argument is not a list");
+  return enc_sym(symrepr_eerror());
 }
 
-static uint32_t eval_let_bindings(uint32_t bind_list, uint32_t env) {
+static VALUE eval_let_bindings(VALUE bind_list, VALUE env) {
 
-  uint32_t new_env = env;
-  uint32_t curr = bind_list; 
-  int res; 
-  
+  VALUE new_env = env;
+  VALUE curr = bind_list;
+  int res;
+
   //setup the bindings
-  while (TYPE_OF(curr) == PTR_TYPE_CONS) { 
-    uint32_t key = car(car(curr));
-    uint32_t val = ENC_SYM(symrepr_nil()); // a temporary
-    uint32_t binding = cons(key,val);
-    new_env = cons(binding, new_env); 
-    curr = cdr(curr); 
+  while (type_of(curr) == PTR_TYPE_CONS) {
+    VALUE key = car(car(curr));
+    VALUE val = NIL; // a temporary
+    VALUE binding = cons(key,val);
+    new_env = cons(binding, new_env);
+    curr = cdr(curr);
   }
 
   // evaluate the bodies
-  curr = bind_list; 
-  while (TYPE_OF(curr) == PTR_TYPE_CONS) {
-    uint32_t key = car(car(curr));
-    uint32_t val = eval_in_env(car(cdr(car(curr))),new_env);
+  curr = bind_list;
+  while (type_of(curr) == PTR_TYPE_CONS) {
+    VALUE key = car(car(curr));
+    VALUE val = eval_in_env(car(cdr(car(curr))),new_env);
 
     res = env_modify_binding(new_env, key, val);
     if (!res) ERROR("Unable to modify letrec bindings");
-    curr = cdr(curr); 
+    curr = cdr(curr);
   }
 
   return new_env;
 }
 
 
-static uint32_t apply_builtin(uint32_t sym, uint32_t args) {
+static VALUE apply_builtin(VALUE sym, VALUE args) {
 
-  uint32_t (*f)(uint32_t) = builtin_lookup_function(DEC_SYM(sym));
+  VALUE (*f)(VALUE) = builtin_lookup_function(dec_sym(sym));
 
   if (f == NULL) {
-    ERROR("Built in function does not exist"); 
-    //return ENC_SYM(symrepr_eerror());
+    ERROR("Built in function does not exist");
+    //return enc_sym(symrepr_eerror());
   }
 
-  return f(args); 
+  return f(args);
 }
